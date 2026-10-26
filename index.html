@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Mafia Role Game</title>
+  <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: linear-gradient(135deg, #1a1a2e, #16213e); color: #eee; margin: 0; padding: 20px; min-height: 100vh; display: flex; flex-direction: column; align-items: center; }
+    h1 { color: #e94560; text-align: center; margin-bottom: 10px; }
+    .container { max-width: 500px; width: 100%; background: rgba(255,255,255,0.05); border-radius: 15px; padding: 20px; box-shadow: 0 8px 32px rgba(0,0,0,0.3); }
+    input, button { width: 100%; padding: 12px; margin: 8px 0; border: none; border-radius: 8px; font-size: 16px; }
+    input { background: #0f3460; color: white; }
+    button { background: #e94560; color: white; cursor: pointer; font-weight: bold; transition: 0.3s; }
+    button:hover { background: #ff6b6b; }
+    button:disabled { background: #555; cursor: not-allowed; }
+    .players { margin-top: 20px; }
+    .player { background: #0f3460; padding: 10px; margin: 5px 0; border-radius: 8px; display: flex; justify-content: space-between; align-items: center; }
+    .ready { color: #4ecca3; }
+    .flashcard {
+      perspective: 1000px;
+      width: 250px;
+      height: 350px;
+      margin: 30px auto;
+      display: none;
+    }
+    .card {
+      width: 100%;
+      height: 100%;
+      position: relative;
+      transform-style: preserve-3d;
+      transition: transform 0.8s;
+      background: linear-gradient(145deg, #e94560, #0f3460);
+      border-radius: 15px;
+      box-shadow: 0 10px 20px rgba(0,0,0,0.5);
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      text-align: center;
+      padding: 20px;
+      color: white;
+    }
+    .card.show { transform: rotateY(0); }
+    .username { font-size: 28px; font-weight: bold; margin-bottom: 20px; }
+    .role { font-size: 36px; font-weight: bold; color: #ffd700; text-shadow: 2px 2px 4px #000; }
+    .status { text-align: center; margin: 15px 0; font-size: 18px; }
+    .hidden { display: none; }
+    .room-info { background: #0f3460; padding: 10px; border-radius: 8px; margin: 10px 0; text-align: center; word-break: break-all; }
+    .link { color: #4ecca3; cursor: pointer; text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <h1>🎃 Mafia Role Game</h1>
+  <div class="container">
+    <div id="setup">
+      <div id="createJoin">
+        <button id="createBtn">Create New Game</button>
+        <p style="text-align:center;">or</p>
+        <input type="text" id="roomInput" placeholder="Enter Room Code to Join">
+        <button id="joinBtn">Join Game</button>
+      </div>
+      <div id="lobby" class="hidden">
+        <div class="room-info">
+          Room Code: <strong id="roomCode"></strong><br>
+          Share this link: <span class="link" id="shareLink"></span>
+        </div>
+        <input type="text" id="username" placeholder="Enter your username" maxlength="20">
+        <button id="readyBtn" disabled>Ready / Start</button>
+        <div class="status" id="status">Waiting for players...</div>
+        <div class="players" id="playersList"></div>
+      </div>
+    </div>
+    <div id="game" class="hidden">
+      <div class="status">Roles assigned! Check your private role card.</div>
+      <div class="flashcard" id="flashcard">
+        <div class="card" id="card">
+          <div class="username" id="cardName"></div>
+          <div class="role" id="cardRole"></div>
+        </div>
+      </div>
+      <button id="showCardBtn">Show My Role Card</button>
+      <div class="players" id="finalPlayers"></div>
+    </div>
+  </div>
+
+  <script>
+    let peer = null;
+    let conn = null; // connection to host (if not host)
+    let isHost = false;
+    let myId = null;
+    let roomId = null;
+    let myUsername = '';
+    let players = {}; // {peerId: {username, ready, role}}
+    let connections = {}; // for host: peerId -> conn
+
+    const createBtn = document.getElementById('createBtn');
+    const joinBtn = document.getElementById('joinBtn');
+    const roomInput = document.getElementById('roomInput');
+    const lobby = document.getElementById('lobby');
+    const createJoin = document.getElementById('createJoin');
+    const roomCodeEl = document.getElementById('roomCode');
+    const shareLinkEl = document.getElementById('shareLink');
+    const usernameInput = document.getElementById('username');
+    const readyBtn = document.getElementById('readyBtn');
+    const statusEl = document.getElementById('status');
+    const playersList = document.getElementById('playersList');
+    const gameDiv = document.getElementById('game');
+    const flashcard = document.getElementById('flashcard');
+    const cardName = document.getElementById('cardName');
+    const cardRole = document.getElementById('cardRole');
+    const showCardBtn = document.getElementById('showCardBtn');
+    const finalPlayers = document.getElementById('finalPlayers');
+
+    function updateURL(room) {
+      const url = new URL(window.location);
+      url.searchParams.set('room', room);
+      window.history.replaceState({}, '', url);
+      shareLinkEl.textContent = url.href;
+      shareLinkEl.onclick = () => {
+        navigator.clipboard.writeText(url.href).then(() => alert('Link copied!'));
+      };
+    }
+
+    function initPeer(id = null) {
+      peer = new Peer(id, { debug: 1 });
+      peer.on('open', (id) => {
+        myId = id;
+        if (isHost) {
+          roomId = id;
+          roomCodeEl.textContent = id;
+          updateURL(id);
+          players[myId] = { username: '', ready: false, role: null };
+          updatePlayersList();
+        }
+      });
+      peer.on('connection', (c) => {
+        if (!isHost) return;
+        c.on('open', () => {
+          connections[c.peer] = c;
+          c.on('data', (data) => handleData(data, c.peer));
+          c.on('close', () => {
+            delete players[c.peer];
+            delete connections[c.peer];
+            broadcastState();
+          });
+        });
+      });
+      peer.on('error', (err) => {
+        console.error(err);
+        statusEl.textContent = 'Connection error. Try again.';
+      });
+    }
+
+    createBtn.onclick = () => {
+      isHost = true;
+      createJoin.classList.add('hidden');
+      lobby.classList.remove('hidden');
+      initPeer();
+    };
+
+    joinBtn.onclick = () => {
+      const rid = roomInput.value.trim();
+      if (!rid) return alert('Enter room code');
+      isHost = false;
+      roomId = rid;
+      createJoin.classList.add('hidden');
+      lobby.classList.remove('hidden');
+      roomCodeEl.textContent = rid;
+      updateURL(rid);
+      initPeer();
+      // connect to host
+      setTimeout(() => {
+        conn = peer.connect(rid);
+        conn.on('open', () => {
+          conn.on('data', (data) => handleData(data, 'host'));
+          // send join
+          conn.send({ type: 'join', username: '' });
+        });
+        conn.on('error', () => statusEl.textContent = 'Could not connect to host. Check room code.');
+      }, 1000);
+    };
+
+    // Auto join if room in URL
+    const urlParams = new URLSearchParams(window.location.search);
+    const autoRoom = urlParams.get('room');
+    if (autoRoom) {
+      roomInput.value = autoRoom;
+      // don't auto join, let user confirm or just join
+      // for simplicity, show join prefilled
+    }
+
+    usernameInput.oninput = () => {
+      myUsername = usernameInput.value.trim();
+      readyBtn.disabled = myUsername.length < 2;
+      if (isHost) {
+        players[myId].username = myUsername;
+        broadcastState();
+      } else if (conn && conn.open) {
+        conn.send({ type: 'update', username: myUsername, ready: false });
+      }
+    };
+
+    readyBtn.onclick = () => {
+      if (myUsername.length < 2) return;
+      const ready = true;
+      readyBtn.textContent = 'Ready! Waiting for others...';
+      readyBtn.disabled = true;
+      if (isHost) {
+        players[myId].username = myUsername;
+        players[myId].ready = ready;
+        checkStart();
+        broadcastState();
+      } else if (conn && conn.open) {
+        conn.send({ type: 'update', username: myUsername, ready: ready });
+      }
+    };
+
+    function handleData(data, from) {
+      if (data.type === 'join' || data.type === 'update') {
+        if (isHost) {
+          if (!players[from]) players[from] = { username: '', ready: false, role: null };
+          if (data.username) players[from].username = data.username;
+          if (typeof data.ready !== 'undefined') players[from].ready = data.ready;
+          // limit to 10
+          if (Object.keys(players).length > 10) {
+            // reject extra
+            if (connections[from]) connections[from].close();
+            return;
+          }
+          broadcastState();
+          checkStart();
+        }
+      } else if (data.type === 'state') {
+        // from host
+        players = data.players;
+        updatePlayersList();
+        statusEl.textContent = `Players: ${Object.keys(players).length} / 10 (min 5)`;
+        if (data.started) {
+          startGameLocal();
+        }
+      } else if (data.type === 'role') {
+        // private role
+        showMyRole(data.role);
+      }
+    }
+
+    function broadcastState(started = false) {
+      if (!isHost) return;
+      const state = { type: 'state', players, started };
+      Object.values(connections).forEach(c => {
+        if (c.open) c.send(state);
+      });
+      // also update self
+      updatePlayersList();
+      statusEl.textContent = `Players: ${Object.keys(players).length} / 10 (min 5)`;
+    }
+
+    function updatePlayersList() {
+      playersList.innerHTML = '';
+      Object.entries(players).forEach(([id, p]) => {
+        const div = document.createElement('div');
+        div.className = 'player';
+        const name = p.username || 'Joining...';
+        const readyMark = p.ready ? '<span class="ready">✓ Ready</span>' : '<span>Waiting</span>';
+        div.innerHTML = `<span>${name} ${id === myId ? '(You)' : ''}</span> ${readyMark}`;
+        playersList.appendChild(div);
+      });
+    }
+
+    function checkStart() {
+      if (!isHost) return;
+      const count = Object.keys(players).length;
+      const allReady = Object.values(players).every(p => p.ready && p.username);
+      if (count >= 5 && count <= 10 && allReady) {
+        assignRoles();
+      }
+    }
+
+    function assignRoles() {
+      const ids = Object.keys(players);
+      const n = ids.length;
+      const roles = [];
+      // 2 Mafia, 1 Savior, rest Citizen
+      for (let i = 0; i < 2; i++) roles.push('Mafia');
+      roles.push('Savior');
+      for (let i = 0; i < n - 3; i++) roles.push('Citizen');
+      // shuffle
+      for (let i = roles.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [roles[i], roles[j]] = [roles[j], roles[i]];
+      }
+      ids.forEach((id, idx) => {
+        players[id].role = roles[idx];
+        if (id === myId) {
+          showMyRole(roles[idx]);
+        } else if (connections[id] && connections[id].open) {
+          connections[id].send({ type: 'role', role: roles[idx] });
+        }
+      });
+      broadcastState(true);
+      startGameLocal();
+    }
+
+    function startGameLocal() {
+      document.getElementById('setup').classList.add('hidden');
+      gameDiv.classList.remove('hidden');
+      // show final players without roles
+      finalPlayers.innerHTML = '<h3>Players in game:</h3>';
+      Object.values(players).forEach(p => {
+        finalPlayers.innerHTML += `<div class="player"><span>${p.username}</span></div>`;
+      });
+    }
+
+    function showMyRole(role) {
+      cardName.textContent = myUsername;
+      cardRole.textContent = role;
+      flashcard.style.display = 'block';
+      // simple animation
+      setTimeout(() => {
+        document.getElementById('card').classList.add('show');
+      }, 100);
+    }
+
+    showCardBtn.onclick = () => {
+      flashcard.style.display = 'block';
+    };
+
+    // Copy room code too
+    roomCodeEl.onclick = () => {
+      navigator.clipboard.writeText(roomId).then(() => alert('Room code copied!'));
+    };
+  </script>
+</body>
+</html>
